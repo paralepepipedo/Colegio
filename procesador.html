@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Procesador de Calendario DOCX a CSV (v3)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+
+    <link rel="stylesheet" href="https://pyscript.net/releases/2024.1.1/core.css" />
+    <script type="module" src="https://pyscript.net/releases/2024.1.1/core.js"></script>
+
+    <py-config>
+        packages = ["beautifulsoup4", "lxml"]
+    </py-config>
+
+</head>
+
+<body class="bg-gray-100 flex items-center justify-center min-h-screen p-4">
+
+    <div class="bg-white p-8 rounded-2xl shadow-xl w-full max-w-2xl space-y-6">
+        <h1 class="text-3xl font-bold text-center text-gray-800">Procesador de Calendario DOCX</h1>
+        <p class="text-center text-gray-500">Sube el archivo <code>.docx</code> del calendario. El script aplicará las
+            reglas de extracción específicas y generará un archivo <code>.csv</code>.</p>
+
+        <div class="bg-gray-50 p-4 rounded-xl border-2 border-dashed border-gray-200">
+            <label for="csv-base-upload"
+                class="flex flex-col items-center justify-center cursor-pointer p-2 text-center hover:bg-gray-100 transition-colors rounded-lg">
+                <i class="fas fa-database text-3xl text-gray-400"></i>
+                <span class="mt-2 text-lg font-medium text-gray-700">1. Cargar Base de Datos (Opcional)</span>
+                <span id="csv-file-name" class="text-sm text-gray-500">Ningún archivo .csv seleccionado</span>
+                <input id="csv-base-upload" type="file" accept=".csv" class="hidden">
+            </label>
+        </div>
+        <div class="bg-gray-50 p-4 rounded-xl border-2 border-dashed border-gray-200">
+            <label for="docx-upload"
+                class="flex flex-col items-center justify-center cursor-pointer p-2 text-center hover:bg-gray-100 transition-colors rounded-lg">
+                <i class="fas fa-file-word text-3xl text-gray-500"></i>
+                <span class="mt-2 text-lg font-medium text-gray-700">2. Cargar Nuevo Calendario .docx</span>
+                <span id="docx-file-name" class="text-sm text-gray-500">Ningún archivo .docx seleccionado</span>
+                <input id="docx-upload" type="file" accept=".docx" class="hidden">
+            </label>
+        </div>
+
+        <div>
+            <button id="process-btn"
+                class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-xl shadow-lg transition-transform transform hover:scale-105 disabled:bg-gray-400 disabled:cursor-not-allowed"
+                disabled>
+                <i class="fas fa-cogs mr-2"></i> 3. Procesar y Generar .csv
+            </button>
+        </div>
+
+        <div id="logs-container" class="hidden space-y-2">
+            <h3 class="text-lg font-semibold text-gray-700">Registro del Proceso:</h3>
+            <div id="logs"
+                class="bg-gray-800 text-white font-mono text-xs p-4 rounded-lg shadow-inner h-40 overflow-y-auto"></div>
+        </div>
+
+        <div id="download-container" class="text-center"></div>
+    </div>
+
+    <script type="py">
+        import asyncio
+        import io
+        import re
+        import csv
+        from datetime import datetime
+        from bs4 import BeautifulSoup
+        from js import document, console, Blob, URL, Object, mammoth
+        from pyodide.ffi import create_proxy
+
+        ASIGNATURAS = {
+            "MATEMÁTICA", "LENGUAJE Y COMUNICACIÓN", "INGLÉS",
+            "ARTES VISUALES", "TECNOLOGÍA", "EDUCACIÓN FÍSICA Y SALUD",
+            "MÚSICA", "HISTORIA", "CIENCIAS", "RELIGION", "ORIENTACION"
+        }
+        DIAS_SEMANA = r'(LUNES|MARTES|MI[ÉR]RCOLES|JUEVES|VIERNES|S[ÁA]BADO|DOMINGO)'
+
+        def log(message):
+            logs_div = document.getElementById("logs")
+            logs_div.innerHTML += f"<p>> {message}</p>"
+            logs_div.scrollTop = logs_div.scrollHeight
+
+        def generar_csv(eventos):
+            if not eventos:
+                log("No se encontraron eventos para generar el CSV.")
+                return
+
+            output = io.StringIO()
+            # Añadimos la columna 'titulo'
+            fieldnames = ['titulo', 'fecha', 'tipo', 'asignatura', 'descripcion']
+            writer = csv.DictWriter(output, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(eventos)
+            csv_content = output.getvalue()
+            # Añadimos el BOM (\ufeff) para compatibilidad con Excel
+            blob = Blob.new(['\ufeff', csv_content], Object(type="text/csv;charset=utf-8;"))
+            url = URL.createObjectURL(blob)
+            
+            download_container = document.getElementById('download-container')
+            download_container.innerHTML = ""
+            link = document.createElement('a')
+            link.href = url
+            link.download = "actividades_actualizadas.csv"
+            link.className = "bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-xl shadow-lg"
+            link.innerHTML = '<i class="fas fa-file-csv mr-2"></i> Descargar archivo .csv'
+            
+            download_container.appendChild(link)
+            log("Archivo .csv generado. ¡Listo para descargar!")
+
+        # --- NUEVA LÓGICA DE EXTRACCIÓN BASADA EN TUS REGLAS ---
+        async def procesar_archivo(event):
+            console.log("Punto de control 1: La función 'procesar_archivo' ha sido llamada.");
+            document.getElementById("logs-container").classList.remove("hidden")
+            document.getElementById("logs").innerHTML = ""
+            document.getElementById("download-container").innerHTML = ""
+            log("Iniciando proceso con nuevas reglas...")
+
+            docx_input = document.getElementById('docx-upload')
+            docx_file = docx_input.files.item(0)
+            if not docx_file:
+                log("Error: No se ha seleccionado un archivo .docx para procesar.")
+                return
+            
+            file_name = docx_file.name
+
+            try:
+                # --- 1. LEER CSV BASE (SI EXISTE) ---
+                actividades_existentes = []
+                csv_input = document.getElementById('csv-base-upload')
+                if csv_input.files.length > 0:
+                    csv_file = csv_input.files.item(0)
+                    log(f"Leyendo base de datos: {csv_file.name}")
+                    contenido_csv_base = await csv_file.text()
+                    
+                    # Usar io.StringIO para tratar el string de texto como si fuera un archivo
+                    f = io.StringIO(contenido_csv_base)
+                    # Usar DictReader para leer el CSV
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        actividades_existentes.append(row)
+                    log(f"Se cargaron {len(actividades_existentes)} actividades desde la base de datos.")
+                else:
+                    log("No se cargó una base de datos. Se creará un archivo nuevo.")
+
+
+                # --- 2. EXTRAER MES Y AÑO DEL NOMBRE DEL ARCHIVO DOCX ---
+                meses_es = {'enero': 1, 'febrero': 2, 'marzo': 3, 'abril': 4, 'mayo': 5, 'junio': 6, 'julio': 7, 'agosto': 8, 'septiembre': 9, 'octubre': 10, 'noviembre': 11, 'diciembre': 12}
+                mes_encontrado = None
+                anio_encontrado = None
+
+                match_anio = re.search(r'(\d{4})', file_name)
+                if match_anio:
+                    anio_encontrado = int(match_anio.group(1))
+                    log(f"Año encontrado en el nombre del archivo: {anio_encontrado}")
+
+                for nombre_mes, num_mes in meses_es.items():
+                    if nombre_mes.upper() in file_name.upper():
+                        mes_encontrado = num_mes
+                        log(f"Mes encontrado en el nombre del archivo: {nombre_mes.capitalize()}")
+                        break
+                
+                if not anio_encontrado or not mes_encontrado:
+                    log("Error: No se pudo encontrar Mes y Año en el nombre del archivo.")
+                    return
+
+                # --- 3. CONVERTIR DOCX A HTML ---
+                log("Convirtiendo DOCX a HTML con Mammoth.js...")
+                array_buffer = await docx_file.arrayBuffer()
+                options = Object(arrayBuffer=array_buffer)
+                result = await mammoth.convertToHtml(options)
+                html_string = result.value                
+                
+                soup = BeautifulSoup(html_string, 'lxml')
+                
+                # --- 4. EXTRAER TÍTULO DEL DOCUMENTO ---
+                titulo_doc = soup.find(['h1', 'p']).text.strip()
+                log(f"Título del documento extraído: '{titulo_doc}'")
+                
+                tabla = soup.find('table')
+                if not tabla:
+                    log("Error: No se encontró una tabla en el documento.")
+                    return
+                
+                # --- 5. EXTRAER EVENTOS DEL DOCX ---
+                # Este método procesa la tabla en pares de filas: una fila de fechas y la siguiente de datos.
+                eventos_extraidos = []
+                filas = tabla.find_all('tr')
+
+                # Iterar sobre las filas de dos en dos (fila de fecha, fila de datos)
+                for i in range(0, len(filas), 2):
+                    if i + 1 >= len(filas): break # Asegurarse de que hay un par de filas
+
+                    fila_fechas = filas[i]
+                    fila_datos = filas[i+1]
+
+                    celdas_fechas = fila_fechas.find_all(['td', 'th'])
+                    celdas_datos = fila_datos.find_all(['td', 'th'])
+
+                    # Iterar sobre las columnas de la fila de fechas
+                    for col_idx, celda_fecha in enumerate(celdas_fechas):
+                        texto_fecha = celda_fecha.get_text(strip=True)
+                        match_dia = re.search(r'(\d+)', texto_fecha)
+
+                        # Si la celda contiene un número, es una fecha de evento
+                        if match_dia and re.search(DIAS_SEMANA, texto_fecha.upper(), re.IGNORECASE):
+                            dia = int(match_dia.group(1))
+                            fecha_completa = f"{anio_encontrado}-{str(mes_encontrado).zfill(2)}-{str(dia).zfill(2)}"
+
+                            # Buscar los datos en la misma columna de la fila siguiente
+                            if col_idx < len(celdas_datos):
+                                celda_datos_evento = celdas_datos[col_idx]
+                                # Usar get_text con separador para manejar <br />
+                                texto_evento = celda_datos_evento.get_text(separator='\n', strip=True)
+
+                                if not texto_evento: continue # Si no hay datos, saltar
+
+                                log(f"--- Encontrado evento en fecha: {fecha_completa} ---")
+                                lineas_evento = texto_evento.split('\n')
+
+                                # Extraer asignatura y descripción
+                                descripcion_final = []
+                                asignatura_encontrada = "Evento"
+                                
+                                for linea in lineas_evento:
+                                    if not linea: continue
+                                    asignatura_hallada = False
+                                    for asignatura_base in ASIGNATURAS:
+                                        if asignatura_base in linea.upper():
+                                            asignatura_encontrada = asignatura_base
+                                            # Reemplazar la asignatura en la línea para no perder el resto de la descripción
+                                            linea = linea.replace(asignatura_base, "").strip()
+                                            asignatura_hallada = True
+                                            break
+                                    descripcion_final.append(linea)
+
+                                descripcion_completa = " | ".join(descripcion_final)
+                                log(f"Asignatura: {asignatura_encontrada}, Descripción: {descripcion_completa[:80]}...")
+
+                                evento = {
+                                    'titulo': titulo_doc,
+                                    'fecha': fecha_completa,
+                                    'tipo': 'Prueba' if 'evaluación' in texto_evento.lower() else 'Tarea',
+                                    'asignatura': asignatura_encontrada,
+                                    'descripcion': descripcion_completa
+                                }
+                                eventos_extraidos.append(evento)
+
+                log(f"Análisis del DOCX finalizado. {len(eventos_extraidos)} eventos nuevos extraídos.")
+
+                # --- 6. FUSIONAR DATOS Y GENERAR CSV FINAL ---
+                # Filtrar las actividades antiguas, eliminando las que pertenecen al mismo documento que se está subiendo
+                actividades_filtradas = [act for act in actividades_existentes if act.get('titulo') != titulo_doc]
+                # Combinar las actividades antiguas filtradas con las nuevas
+                eventos_finales = actividades_filtradas + eventos_extraidos
+                log(f"Fusión completada. Total de actividades a guardar: {len(eventos_finales)}.")
+                generar_csv(eventos_finales)
+
+            except Exception as e:
+                log(f"ERROR FATAL: {e}")
+                console.error(str(e))
+
+        def main():
+            upload_input = document.getElementById('docx-upload')
+            csv_upload_input = document.getElementById('csv-base-upload')
+            process_button = document.getElementById('process-btn')
+            docx_file_name_span = document.getElementById('docx-file-name')
+            csv_file_name_span = document.getElementById('csv-file-name')
+
+            def on_docx_change(event):
+                if event.target.files.length > 0:
+                    docx_file_name_span.textContent = event.target.files.item(0).name
+                    process_button.disabled = False
+                else:
+                    docx_file_name_span.textContent = "Ningún archivo .docx seleccionado"
+                    process_button.disabled = True
+            
+            def on_csv_change(event):
+                if event.target.files.length > 0:
+                    csv_file_name_span.textContent = event.target.files.item(0).name
+                else:
+                    csv_file_name_span.textContent = "Ningún archivo .csv seleccionado"
+            
+            upload_input.addEventListener('change', create_proxy(on_docx_change))
+            csv_upload_input.addEventListener('change', create_proxy(on_csv_change))
+            process_button.addEventListener('click', create_proxy(procesar_archivo))
+            log("Sistema listo para procesar con reglas específicas.")
+
+        main()
+    </script>
+</body>
+
+</html>
